@@ -224,9 +224,68 @@ class YAMNetSegmenter:
             else:
                 merged[-1].end = seg.end
 
+        merged = self._postprocess_step1_intervals(merged)
+
         t1_list = [interval.end for interval in merged[:-1]]
         logging.info("Step 1 complete. segments=%d merged_intervals=%d boundaries=%d", n_segments, len(merged), len(t1_list))
         return merged, t1_list
+
+    @staticmethod
+    def _postprocess_step1_intervals(intervals: Sequence[Interval]) -> List[Interval]:
+        """Apply post rules for silence bridges in step 1 output.
+
+        Rules:
+        1) Speech - Silent(1/2)+ - Music (and inverse) => direct boundary at silence midpoint.
+        2) Speech - Silent2+ - Speech (and Music - Silent2+ - Music) => merge into one interval.
+        """
+
+        def is_silent(label: str) -> bool:
+            return label in {"Silent1", "Silent2"}
+
+        out: List[Interval] = []
+        i = 0
+        while i < len(intervals):
+            current = intervals[i]
+
+            if current.label in {"Speech", "Music"}:
+                j = i + 1
+                while j < len(intervals) and is_silent(intervals[j].label):
+                    j += 1
+
+                if j > i + 1 and j < len(intervals):
+                    next_interval = intervals[j]
+                    silent_block = intervals[i + 1 : j]
+                    all_silent2 = all(seg.label == "Silent2" for seg in silent_block)
+
+                    # Speech - Silent2+ - Speech / Music - Silent2+ - Music => merge.
+                    if all_silent2 and next_interval.label == current.label:
+                        out.append(Interval(start=current.start, end=next_interval.end, label=current.label))
+                        i = j + 1
+                        continue
+
+                    # Speech - Silent(1/2)+ - Music / Music - Silent(1/2)+ - Speech
+                    # => split at midpoint of silent block.
+                    if next_interval.label in {"Speech", "Music"} and next_interval.label != current.label:
+                        silent_start = intervals[i + 1].start
+                        silent_end = intervals[j - 1].end
+                        midpoint = (silent_start + silent_end) / 2.0
+
+                        out.append(Interval(start=current.start, end=midpoint, label=current.label))
+                        out.append(Interval(start=midpoint, end=next_interval.end, label=next_interval.label))
+                        i = j + 1
+                        continue
+
+            out.append(Interval(start=current.start, end=current.end, label=current.label))
+            i += 1
+
+        # Re-merge adjacent same labels to keep output compact.
+        merged: List[Interval] = []
+        for seg in out:
+            if not merged or merged[-1].label != seg.label:
+                merged.append(seg)
+            else:
+                merged[-1].end = seg.end
+        return merged
 
     @staticmethod
     def _distance(expected_label: str, observed: ClassificationResult) -> float:
