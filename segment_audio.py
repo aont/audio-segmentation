@@ -293,15 +293,29 @@ def refine_boundary(
 
     best_k = 0
     best_score = -1
+    best_abs_diff = float("inf")
     for k in range(n):
         left_score = int(left_prefix[k])
         right_score = int(right_suffix[k + 1]) if k + 1 < n else 0
         score = left_score + right_score
-        if score > best_score:
+        abs_diff = abs(left_score - right_score)
+        if score > best_score or (score == best_score and abs_diff < best_abs_diff):
             best_score = score
             best_k = k
+            best_abs_diff = abs_diff
 
-    refined = float(starts[best_k] + FINE_WIN_SEC)
+    left_candidates = np.where(left_match[: best_k + 1] == 1)[0]
+    right_candidates = np.where(right_match[best_k + 1 :] == 1)[0] + (best_k + 1)
+
+    if left_candidates.size > 0 and right_candidates.size > 0:
+        left_idx = int(left_candidates[-1])
+        right_idx = int(right_candidates[0])
+        left_center = float(starts[left_idx] + (FINE_WIN_SEC / 2.0))
+        right_center = float(starts[right_idx] + (FINE_WIN_SEC / 2.0))
+        refined = (left_center + right_center) / 2.0
+    else:
+        refined = float(starts[best_k] + (FINE_WIN_SEC / 2.0))
+
     return min(max(0.0, refined), total_dur)
 
 

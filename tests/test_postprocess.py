@@ -1,6 +1,8 @@
 import unittest
 
-from segment_audio import Segment, postprocess_step2_segments
+import numpy as np
+
+from segment_audio import FINE_WIN_SEC, Segment, postprocess_step2_segments, refine_boundary
 
 
 class PostprocessStep2Tests(unittest.TestCase):
@@ -35,6 +37,37 @@ class PostprocessStep2Tests(unittest.TestCase):
         self.assertEqual(out[0].label, "Speech")
         self.assertEqual(out[0].start, 0.0)
         self.assertEqual(out[0].end, 10.0)
+
+
+class _FakeClassifier:
+    def __init__(self, labels):
+        self._labels = list(labels)
+        self._i = 0
+
+    def classify_non_silent(self, audio):
+        label = self._labels[self._i]
+        self._i += 1
+        return label
+
+
+class RefineBoundaryTests(unittest.TestCase):
+    def test_refine_boundary_uses_midpoint_of_transition_windows(self):
+        labels = ["Speech", "Speech", "Music", "Music", "Music"]
+        classifier = _FakeClassifier(labels)
+
+        total_dur = 1.775
+        audio = np.full(int(round(16000 * total_dur)), 0.1, dtype=np.float32)
+        refined = refine_boundary(
+            audio=audio,
+            t0=0.1,
+            left_label="Speech",
+            right_label="Music",
+            classifier=classifier,
+            total_dur=total_dur,
+        )
+
+        expected = ((0.2 + FINE_WIN_SEC / 2.0) + (0.4 + FINE_WIN_SEC / 2.0)) / 2.0
+        self.assertAlmostEqual(refined, expected, places=6)
 
 
 if __name__ == "__main__":
