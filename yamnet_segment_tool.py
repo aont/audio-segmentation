@@ -51,12 +51,21 @@ class YAMNetSegmenter:
     def _resolve_step1_label(left_label: str, right_label: str) -> str:
         """Resolve Step 1 merge label for adjacent segments.
 
-        When Speech1/Speech2 appear consecutively, keep the merged interval as Speech2.
+        For subtype pairs that should be treated as one region in Step 1,
+        keep only one merged interval.
         """
         speech_pair = {left_label, right_label}
         if speech_pair <= {"Speech1", "Speech2"}:
             return "Speech2"
         return right_label
+
+    @staticmethod
+    def _is_step1_merge_pair(left_label: str, right_label: str) -> bool:
+        if left_label == right_label:
+            return True
+        silence_pair = {left_label, right_label} <= {"Silent1", "Silent2"}
+        speech_pair = {left_label, right_label} <= {"Speech1", "Speech2"}
+        return silence_pair or speech_pair
 
     def __init__(
         self,
@@ -236,9 +245,7 @@ class YAMNetSegmenter:
 
             previous_label = merged[-1].label
             resolved_label = self._resolve_step1_label(previous_label, seg.label)
-            is_speech_pair = {previous_label, seg.label} <= {"Speech1", "Speech2"}
-
-            if previous_label == seg.label or is_speech_pair:
+            if self._is_step1_merge_pair(previous_label, seg.label):
                 merged[-1].label = resolved_label
                 merged[-1].end = seg.end
             else:
