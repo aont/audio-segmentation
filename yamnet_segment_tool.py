@@ -23,6 +23,7 @@ from typing import Dict, List, Sequence, Tuple
 import numpy as np
 import tensorflow as tf
 import tensorflow_hub as hub
+from rich.progress import track
 
 
 TARGET_SAMPLE_RATE = 16000
@@ -182,7 +183,7 @@ class YAMNetSegmenter:
         logging.info("Step 1: coarse classification started (tyam=%.2fs)", self.tyam)
         n_segments = int(math.ceil(duration_s / self.tyam))
         coarse: List[Interval] = []
-        for i in range(n_segments):
+        for i in track(range(n_segments), description="Step 1 (coarse classification)", total=n_segments):
             start = i * self.tyam
             end = min((i + 1) * self.tyam, duration_s)
             result = self.classify_at(audio, start, end)

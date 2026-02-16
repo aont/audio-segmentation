@@ -34,3 +34,4 @@ The script outputs JSON with:
 - Non-WAV formats (e.g. m4a/mp3) are decoded through `ffmpeg` when available.
 - YAMNet is loaded from TF-Hub (`google/yamnet/1`).
 - Debug logs are emitted with `--log-level DEBUG`.
+- Step 1 shows a CLI progress bar via `rich.progress`.
