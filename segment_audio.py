@@ -405,30 +405,36 @@ def postprocess_step2_segments(segments: Sequence[Segment]) -> List[Segment]:
 
     # Rule 3: (Music|Speech) - Silence - (Music|Speech)
     # -> split at middle of Silence and remove Silence.
-    out3: List[Segment] = []
-    i = 0
     active_labels = {"Music", "Speech"}
-    while i < len(rule1):
-        if (
-            i + 2 < len(rule1)
-            and rule1[i].label in active_labels
-            and rule1[i + 1].label == "Silence"
-            and rule1[i + 2].label in active_labels
-        ):
-            left = rule1[i]
-            mid = rule1[i + 1]
-            right = rule1[i + 2]
-            midpoint = (mid.start + mid.end) / 2.0
+    changed = True
+    while changed:
+        changed = False
+        out3: List[Segment] = []
+        i = 0
+        while i < len(rule1):
+            if (
+                i + 2 < len(rule1)
+                and rule1[i].label in active_labels
+                and rule1[i + 1].label == "Silence"
+                and rule1[i + 2].label in active_labels
+            ):
+                left = rule1[i]
+                mid = rule1[i + 1]
+                right = rule1[i + 2]
+                midpoint = (mid.start + mid.end) / 2.0
 
-            out3.append(Segment(left.start, midpoint, left.label))
-            out3.append(Segment(midpoint, right.end, right.label))
-            i += 3
-            continue
+                out3.append(Segment(left.start, midpoint, left.label))
+                out3.append(Segment(midpoint, right.end, right.label))
+                i += 3
+                changed = True
+                continue
 
-        out3.append(Segment(rule1[i].start, rule1[i].end, rule1[i].label))
-        i += 1
+            out3.append(Segment(rule1[i].start, rule1[i].end, rule1[i].label))
+            i += 1
 
-    return merge_adjacent_same_label(out3)
+        rule1 = merge_adjacent_same_label(out3)
+
+    return rule1
 
 
 def segments_to_dicts(segments: Sequence[Segment]) -> List[dict]:
