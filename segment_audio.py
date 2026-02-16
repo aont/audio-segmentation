@@ -99,6 +99,9 @@ class Segment:
     label: str
 
 
+SILENT_LABELS = {"Silence", "Silence2", "Silent", "Silent1", "Silent2"}
+
+
 class YAMNetClassifier:
     def __init__(self) -> None:
         try:
@@ -348,6 +351,86 @@ def refine_segments(
     return out
 
 
+def merge_adjacent_same_label(segments: Sequence[Segment]) -> List[Segment]:
+    if not segments:
+        return []
+
+    merged: List[Segment] = [Segment(segments[0].start, segments[0].end, segments[0].label)]
+    for seg in segments[1:]:
+        last = merged[-1]
+        if seg.label == last.label:
+            last.end = seg.end
+        else:
+            merged.append(Segment(seg.start, seg.end, seg.label))
+    return merged
+
+
+def postprocess_step2_segments(segments: Sequence[Segment]) -> List[Segment]:
+    if not segments:
+        return []
+
+    current = [Segment(s.start, s.end, s.label) for s in segments]
+
+    # Rule 1: Merge consecutive silent variants and normalize label to "Silence".
+    rule1: List[Segment] = []
+    for seg in current:
+        label = "Silence" if seg.label in SILENT_LABELS else seg.label
+        if rule1 and label == "Silence" and rule1[-1].label == "Silence":
+            rule1[-1].end = seg.end
+        else:
+            rule1.append(Segment(seg.start, seg.end, label))
+
+    # Rule 2: Speech - Silence - Speech => Speech.
+    changed = True
+    while changed:
+        changed = False
+        out: List[Segment] = []
+        i = 0
+        while i < len(rule1):
+            if (
+                i + 2 < len(rule1)
+                and rule1[i].label == "Speech"
+                and rule1[i + 1].label == "Silence"
+                and rule1[i + 2].label == "Speech"
+            ):
+                out.append(Segment(rule1[i].start, rule1[i + 2].end, "Speech"))
+                i += 3
+                changed = True
+                continue
+
+            out.append(Segment(rule1[i].start, rule1[i].end, rule1[i].label))
+            i += 1
+
+        rule1 = merge_adjacent_same_label(out)
+
+    # Rule 3: (Music|Speech) - Silence - (Music|Speech)
+    # -> split at middle of Silence and remove Silence.
+    out3: List[Segment] = []
+    i = 0
+    active_labels = {"Music", "Speech"}
+    while i < len(rule1):
+        if (
+            i + 2 < len(rule1)
+            and rule1[i].label in active_labels
+            and rule1[i + 1].label == "Silence"
+            and rule1[i + 2].label in active_labels
+        ):
+            left = rule1[i]
+            mid = rule1[i + 1]
+            right = rule1[i + 2]
+            midpoint = (mid.start + mid.end) / 2.0
+
+            out3.append(Segment(left.start, midpoint, left.label))
+            out3.append(Segment(midpoint, right.end, right.label))
+            i += 3
+            continue
+
+        out3.append(Segment(rule1[i].start, rule1[i].end, rule1[i].label))
+        i += 1
+
+    return merge_adjacent_same_label(out3)
+
+
 def segments_to_dicts(segments: Sequence[Segment]) -> List[dict]:
     return [
         {
@@ -407,6 +490,8 @@ def main() -> int:
             classifier,
             on_boundary_done=lambda: progress.advance(refine_task),
         )
+
+    final_segments = postprocess_step2_segments(final_segments)
 
     for index, seg in enumerate(final_segments, start=1):
         print(
