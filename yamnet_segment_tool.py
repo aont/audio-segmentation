@@ -27,6 +27,7 @@ from rich.progress import track
 TARGET_SAMPLE_RATE = 16000
 TYAM_DEFAULT = 0.96
 TFINE_DEFAULT = 0.1
+STEP1_LABEL_HOLD_FRAMES = 4
 
 
 @dataclass
@@ -183,9 +184,22 @@ class YAMNetSegmenter:
         logging.info("Step 1: coarse classification started (tyam=%.2fs)", self.tyam)
         n_segments = int(math.ceil(duration_s / self.tyam))
         coarse: List[Interval] = []
+        forced_labels: Dict[int, str] = {}
         for i in track(range(n_segments), description="Step 1 (coarse classification)", total=n_segments):
             start = i * self.tyam
             end = min((i + 1) * self.tyam, duration_s)
+
+            if i in forced_labels:
+                coarse.append(Interval(start=start, end=end, label=forced_labels[i]))
+                logging.debug(
+                    "[STEP1] seg=%04d %.2f-%.2f label=%s (skipped; copied from previous YAMNet result)",
+                    i,
+                    start,
+                    end,
+                    forced_labels[i],
+                )
+                continue
+
             result = self.classify_at(audio, start, end)
             coarse.append(Interval(start=start, end=end, label=result.label))
             logging.debug(
@@ -198,6 +212,10 @@ class YAMNetSegmenter:
                 result.speech_prob,
                 result.music_prob,
             )
+
+            if result.label in {"Speech", "Music"}:
+                for skip_idx in range(i + 1, min(i + 1 + STEP1_LABEL_HOLD_FRAMES, n_segments)):
+                    forced_labels[skip_idx] = result.label
 
         merged: List[Interval] = []
         for seg in coarse:
