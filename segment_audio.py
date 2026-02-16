@@ -350,9 +350,23 @@ def refine_segments(
 
 def segments_to_dicts(segments: Sequence[Segment]) -> List[dict]:
     return [
-        {"start": round(s.start, 3), "end": round(s.end, 3), "label": s.label}
+        {
+            "start": round(s.start, 3),
+            "end": round(s.end, 3),
+            "start_hms": format_hhmmss(s.start),
+            "end_hms": format_hhmmss(s.end),
+            "label": s.label,
+            "type": s.label,
+        }
         for s in segments
     ]
+
+
+def format_hhmmss(seconds: float) -> str:
+    total_seconds = int(round(seconds))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
 
 def parse_args() -> argparse.Namespace:
@@ -392,6 +406,12 @@ def main() -> int:
             coarse,
             classifier,
             on_boundary_done=lambda: progress.advance(refine_task),
+        )
+
+    for index, seg in enumerate(final_segments, start=1):
+        print(
+            f"Segment {index:03d} | {format_hhmmss(seg.start)} - "
+            f"{format_hhmmss(seg.end)} | type={seg.label}"
         )
 
     print(json.dumps(segments_to_dicts(final_segments), indent=args.indent, ensure_ascii=False))
