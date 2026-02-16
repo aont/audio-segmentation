@@ -378,7 +378,7 @@ def main() -> int:
         TextColumn("{task.completed}/{task.total}"),
         TimeElapsedColumn(),
     ) as progress:
-        coarse_task = progress.add_task("ステップ1: 粗い区間分割", total=chunk_count)
+        coarse_task = progress.add_task("Step 1: Coarse segmentation", total=chunk_count)
         coarse = build_coarse_segments(
             audio,
             classifier,
@@ -386,7 +386,7 @@ def main() -> int:
         )
 
         boundary_count = max(0, len(coarse) - 1)
-        refine_task = progress.add_task("ステップ2: 境界の微調整", total=boundary_count)
+        refine_task = progress.add_task("Step 2: Boundary refinement", total=boundary_count)
         final_segments = refine_segments(
             audio,
             coarse,
