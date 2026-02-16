@@ -229,6 +229,70 @@ class YAMNetSegmenter:
         return merged, t1_list
 
     @staticmethod
+    def postprocess_step1_intervals(intervals: Sequence[Interval]) -> List[Interval]:
+        """Apply rule-based smoothing on step1 output.
+
+        Rules:
+        1) Speech - (Silent1|Silent2)+ - Music (and inverse)
+           => split at silent-range midpoint into Speech-Music / Music-Speech.
+        2) Speech - Silent2+ - Speech (and Music variant)
+           => merge as one Speech / Music interval.
+        """
+        if not intervals:
+            return []
+
+        out: List[Interval] = []
+        i = 0
+        while i < len(intervals):
+            current = intervals[i]
+            if current.label not in {"Speech", "Music"}:
+                out.append(Interval(start=current.start, end=current.end, label=current.label))
+                i += 1
+                continue
+
+            j = i + 1
+            while j < len(intervals) and intervals[j].label in {"Silent1", "Silent2"}:
+                j += 1
+
+            if j >= len(intervals) or j == i + 1:
+                out.append(Interval(start=current.start, end=current.end, label=current.label))
+                i += 1
+                continue
+
+            next_interval = intervals[j]
+            if next_interval.label not in {"Speech", "Music"}:
+                out.append(Interval(start=current.start, end=current.end, label=current.label))
+                i += 1
+                continue
+
+            silent_block = intervals[i + 1 : j]
+            silent_start = silent_block[0].start
+            silent_end = silent_block[-1].end
+
+            if current.label != next_interval.label:
+                mid = (silent_start + silent_end) / 2.0
+                out.append(Interval(start=current.start, end=mid, label=current.label))
+                out.append(Interval(start=mid, end=next_interval.end, label=next_interval.label))
+                i = j + 1
+                continue
+
+            if all(seg.label == "Silent2" for seg in silent_block):
+                out.append(Interval(start=current.start, end=next_interval.end, label=current.label))
+                i = j + 1
+                continue
+
+            out.append(Interval(start=current.start, end=current.end, label=current.label))
+            i += 1
+
+        merged_out: List[Interval] = []
+        for seg in out:
+            if not merged_out or merged_out[-1].label != seg.label:
+                merged_out.append(seg)
+            else:
+                merged_out[-1].end = seg.end
+        return merged_out
+
+    @staticmethod
     def _distance(expected_label: str, observed: ClassificationResult) -> float:
         mismatch = 0.0 if observed.label == expected_label else 1.0
         confidence = observed.details.get("speech_prob", 0.0) if expected_label == "Speech" else 0.0
@@ -408,7 +472,9 @@ def main() -> None:
     )
 
     merged, t1_list = segmenter.step1_coarse(audio, duration_s)
-    t2_list = segmenter.step2_refine(audio, duration_s, merged, t1_list)
+    postprocessed = segmenter.postprocess_step1_intervals(merged)
+    t1_list = [interval.end for interval in postprocessed[:-1]]
+    t2_list = segmenter.step2_refine(audio, duration_s, postprocessed, t1_list)
 
     output = {
         "config": {
@@ -418,7 +484,7 @@ def main() -> None:
             "tfine": args.tfine,
             "duration_s": duration_s,
         },
-        "step1_intervals": [interval.__dict__ for interval in merged],
+        "step1_intervals": [interval.__dict__ for interval in postprocessed],
         "t1_list": t1_list,
         "t2_list": t2_list,
     }
