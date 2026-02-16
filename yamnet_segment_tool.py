@@ -15,6 +15,7 @@ import csv
 import json
 import logging
 import math
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Sequence, Tuple
@@ -267,23 +268,73 @@ class YAMNetSegmenter:
 
 
 def load_audio_mono16k(audio_path: Path) -> Tuple[np.ndarray, float]:
-    binary = tf.io.read_file(str(audio_path))
-    wav, sample_rate = tf.audio.decode_wav(binary, desired_channels=1)
-    wav = tf.squeeze(wav, axis=-1)
-
-    sample_rate_value = int(sample_rate.numpy())
-    if sample_rate_value != TARGET_SAMPLE_RATE:
-        wav = tf.signal.resample(wav, int(tf.shape(wav)[0] * TARGET_SAMPLE_RATE / sample_rate_value))
+    try:
+        binary = tf.io.read_file(str(audio_path))
+        wav, sample_rate = tf.audio.decode_wav(binary, desired_channels=1)
+        audio = tf.squeeze(wav, axis=-1).numpy().astype(np.float32)
+        sample_rate_value = int(sample_rate.numpy())
+    except tf.errors.InvalidArgumentError:
+        audio = _decode_with_ffmpeg(audio_path)
         sample_rate_value = TARGET_SAMPLE_RATE
 
-    audio = wav.numpy().astype(np.float32)
+    if sample_rate_value != TARGET_SAMPLE_RATE:
+        audio = _resample_audio(audio, sample_rate_value, TARGET_SAMPLE_RATE)
+        sample_rate_value = TARGET_SAMPLE_RATE
+
     duration_s = len(audio) / float(sample_rate_value)
     return audio, duration_s
 
 
+def _resample_audio(audio: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarray:
+    if src_rate <= 0:
+        raise ValueError(f"Invalid source sample rate: {src_rate}")
+    if len(audio) == 0 or src_rate == dst_rate:
+        return audio.astype(np.float32, copy=False)
+
+    out_len = max(1, int(round(len(audio) * dst_rate / src_rate)))
+    src_x = np.arange(len(audio), dtype=np.float64)
+    dst_x = np.linspace(0.0, len(audio) - 1, out_len, dtype=np.float64)
+    return np.interp(dst_x, src_x, audio).astype(np.float32)
+
+
+def _decode_with_ffmpeg(audio_path: Path) -> np.ndarray:
+    ffmpeg_cmd = [
+        "ffmpeg",
+        "-v",
+        "error",
+        "-i",
+        str(audio_path),
+        "-f",
+        "f32le",
+        "-acodec",
+        "pcm_f32le",
+        "-ac",
+        "1",
+        "-ar",
+        str(TARGET_SAMPLE_RATE),
+        "-",
+    ]
+
+    try:
+        proc = subprocess.run(ffmpeg_cmd, capture_output=True, check=True)
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            "Audio is not a WAV file TensorFlow can decode and `ffmpeg` is not installed. "
+            "Install ffmpeg or provide a PCM WAV input."
+        ) from exc
+    except subprocess.CalledProcessError as exc:
+        stderr = exc.stderr.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(f"ffmpeg failed to decode audio: {stderr or 'unknown error'}") from exc
+
+    audio = np.frombuffer(proc.stdout, dtype=np.float32)
+    if audio.size == 0:
+        raise RuntimeError("Decoded audio is empty.")
+    return audio
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Segment audio using YAMNet + silence thresholds.")
-    parser.add_argument("audio_path", type=Path, help="Input WAV file path.")
+    parser.add_argument("audio_path", type=Path, help="Input audio file path (WAV recommended; other formats via ffmpeg).")
     parser.add_argument("--silent1-db", type=float, default=-55.0, help="Very quiet threshold in dBFS (Silent1).")
     parser.add_argument("--silent2-db", type=float, default=-40.0, help="Moderately quiet threshold in dBFS (Silent2).")
     parser.add_argument("--tyam", type=float, default=TYAM_DEFAULT, help="YAMNet frame length in seconds (default 0.96).")

@@ -1,6 +1,6 @@
 # YAMNet Audio Segmentation Tool
 
-This repository provides a Python tool that segments an input WAV audio file into intervals labeled as:
+This repository provides a Python tool that segments an input audio file into intervals labeled as:
 
 - `Silent1` (very quiet)
 - `Silent2` (moderately quiet)
@@ -14,7 +14,7 @@ This repository provides a Python tool that segments an input WAV audio file int
 ## Usage
 
 ```bash
-python yamnet_segment_tool.py input.wav \
+python yamnet_segment_tool.py input.m4a \
   --silent1-db -55 \
   --silent2-db -40 \
   --tyam 0.96 \
@@ -30,6 +30,7 @@ The script outputs JSON with:
 
 ## Notes
 
-- Input should be a WAV file readable by TensorFlow's `tf.audio.decode_wav`.
+- WAV input is decoded by TensorFlow.
+- Non-WAV formats (e.g. m4a/mp3) are decoded through `ffmpeg` when available.
 - YAMNet is loaded from TF-Hub (`google/yamnet/1`).
 - Debug logs are emitted with `--log-level DEBUG`.
