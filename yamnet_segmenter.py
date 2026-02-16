@@ -418,6 +418,25 @@ def step2_refine(
     return refined
 
 
+def log_segment_results(intervals: Sequence[Interval], refined_boundaries: Sequence[float]) -> None:
+    """Log final segment identification results."""
+    LOGGER.info("Segment identification result (%d segments):", len(intervals))
+    for idx, interval in enumerate(intervals):
+        LOGGER.info(
+            "  Segment %d: %.3f-%.3f sec => %s",
+            idx,
+            interval.start,
+            interval.end,
+            interval.label,
+        )
+
+    if not refined_boundaries:
+        LOGGER.info("No internal boundaries were refined.")
+        return
+
+    LOGGER.info("Refined boundaries (t2): %s", ", ".join(f"{x:.3f}" for x in refined_boundaries))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Segment audio into Music/Speech/Silence using YAMNet.",
@@ -454,6 +473,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     coarse = step1(audio, args.tyam, args.tsilence, args.DB_silent, runtime)
     t1_list = [x.end for x in coarse[:-1]]
     t2_list = step2_refine(audio, coarse, args.tyam, args.tfine, args.DB_silent, runtime)
+    log_segment_results(coarse, t2_list)
 
     payload = {
         "intervals": [
