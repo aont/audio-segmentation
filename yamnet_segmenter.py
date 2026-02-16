@@ -163,6 +163,7 @@ def coarse_pass(y):
             "chunk_index": i,
             "start_sec": i * CHUNK_SEC,
             "end_sec": (i + 1) * CHUNK_SEC,
+            "mid_sec": (i + 0.5) * CHUNK_SEC,
             **result,
         })
 
@@ -177,18 +178,18 @@ def build_segments(coarse):
 
     segs = [{
         "label": coarse[0]["label"],
-        "start": coarse[0]["start_sec"],
-        "end": coarse[0]["end_sec"]
+        "start": coarse[0]["mid_sec"],
+        "end": coarse[0]["mid_sec"]
     }]
 
     for r in coarse[1:]:
         if r["label"] == segs[-1]["label"]:
-            segs[-1]["end"] = r["end_sec"]
+            segs[-1]["end"] = r["mid_sec"]
         else:
             segs.append({
                 "label": r["label"],
-                "start": r["start_sec"],
-                "end": r["end_sec"]
+                "start": r["mid_sec"],
+                "end": r["mid_sec"]
             })
 
     return segs
@@ -278,6 +279,44 @@ def sec_to_hms(sec):
     s = total % 60
     return f"{h:02d}:{m:02d}:{s:02d}"
 
+
+
+
+def build_copied_padding(source, pad_len, from_start):
+    if pad_len <= 0:
+        return np.array([], dtype=source.dtype)
+
+    if len(source) == 0:
+        return np.zeros(pad_len, dtype=np.float32)
+
+    if from_start:
+        copied = source[:pad_len]
+    else:
+        copied = source[-pad_len:]
+
+    if len(copied) < pad_len:
+        copied = np.pad(copied, (0, pad_len - len(copied)))
+
+    return copied
+
+def unpad_segments(segments, pad_sec, original_duration_sec):
+    unpadded = []
+
+    for seg in segments:
+        start = max(0.0, min(seg["start"] - pad_sec, original_duration_sec))
+        end = max(0.0, min(seg["end"] - pad_sec, original_duration_sec))
+
+        if end < start:
+            start, end = end, start
+
+        unpadded.append({
+            "label": seg["label"],
+            "start": start,
+            "end": end,
+        })
+
+    return unpadded
+
 # ----------------------------
 # Main
 # ----------------------------
@@ -285,10 +324,19 @@ if __name__ == "__main__":
     audio_path = argv[1]
 
     y, sr = librosa.load(audio_path, sr=TARGET_SR, mono=True)
+    original_duration_sec = len(y) / TARGET_SR
+
+    pad_sec = CHUNK_SEC / 2.0
+    pad_len = int(round(pad_sec * TARGET_SR))
+    start_copy = build_copied_padding(y, pad_len, from_start=True)
+    end_copy = build_copied_padding(y, pad_len, from_start=False)
+    y = np.concatenate([start_copy, y, end_copy])
 
     coarse = coarse_pass(y)
     segments = build_segments(coarse)
     refined_segments = refine_segments_with_finepass(y, segments)
+    segments = unpad_segments(segments, pad_sec, original_duration_sec)
+    refined_segments = unpad_segments(refined_segments, pad_sec, original_duration_sec)
 
     print("=== Segments (Coarse) ===")
     for s in segments:
