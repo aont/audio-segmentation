@@ -128,18 +128,38 @@ class YAMNetSegmenter:
     def classify_window(self, segment: np.ndarray) -> ClassificationResult:
         rms_db = self._rms_db(segment)
 
+        if rms_db <= self.silent1_db:
+            return ClassificationResult(
+                label="Silent1",
+                rms_db=rms_db,
+                speech_prob=0.0,
+                music_prob=0.0,
+                details={
+                    "speech_prob": 0.0,
+                    "music_prob": 0.0,
+                    "silence_db": rms_db,
+                },
+            )
+        if rms_db <= self.silent2_db:
+            return ClassificationResult(
+                label="Silent2",
+                rms_db=rms_db,
+                speech_prob=0.0,
+                music_prob=0.0,
+                details={
+                    "speech_prob": 0.0,
+                    "music_prob": 0.0,
+                    "silence_db": rms_db,
+                },
+            )
+
         scores, _, _ = self.model(segment)
         score_np = scores.numpy()
         mean_scores = score_np.mean(axis=0) if score_np.ndim == 2 else score_np
         speech_prob = float(mean_scores[self.speech_indices].sum()) if self.speech_indices else 0.0
         music_prob = float(mean_scores[self.music_indices].sum()) if self.music_indices else 0.0
 
-        if rms_db <= self.silent1_db:
-            label = "Silent1"
-        elif rms_db <= self.silent2_db:
-            label = "Silent2"
-        else:
-            label = "Speech" if speech_prob >= music_prob else "Music"
+        label = "Speech" if speech_prob >= music_prob else "Music"
 
         details = {
             "speech_prob": speech_prob,
