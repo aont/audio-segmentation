@@ -18,9 +18,16 @@ import os
 import subprocess
 import sys
 from dataclasses import dataclass
-from typing import List, Sequence
+from typing import Callable, List, Sequence
 
 import numpy as np
+from rich.progress import (
+    BarColumn,
+    Progress,
+    SpinnerColumn,
+    TextColumn,
+    TimeElapsedColumn,
+)
 
 TARGET_SR = 16000
 CHUNK_SEC = 8.0
@@ -210,7 +217,11 @@ def classify_chunk(audio: np.ndarray, classifier: YAMNetClassifier) -> str:
     return classifier.classify_non_silent(audio)
 
 
-def build_coarse_segments(audio: np.ndarray, classifier: YAMNetClassifier) -> List[Segment]:
+def build_coarse_segments(
+    audio: np.ndarray,
+    classifier: YAMNetClassifier,
+    on_chunk_done: Callable[[], None] | None = None,
+) -> List[Segment]:
     total_dur = len(audio) / TARGET_SR
     if total_dur <= 0:
         return []
@@ -223,6 +234,8 @@ def build_coarse_segments(audio: np.ndarray, classifier: YAMNetClassifier) -> Li
         e = int(round(end * TARGET_SR))
         label = classify_chunk(audio[s:e], classifier)
         raw_segments.append(Segment(pos, end, label))
+        if on_chunk_done is not None:
+            on_chunk_done()
         pos = end
 
     if not raw_segments:
@@ -251,6 +264,7 @@ def refine_boundary(
     right_label: str,
     classifier: YAMNetClassifier,
     total_dur: float,
+    on_window_done: Callable[[], None] | None = None,
 ) -> float:
     lo = max(0.0, t0 - FINE_SEARCH_RADIUS_SEC)
     hi = min(total_dur - FINE_WIN_SEC, t0 + FINE_SEARCH_RADIUS_SEC - FINE_WIN_SEC)
@@ -261,7 +275,11 @@ def refine_boundary(
     if starts.size == 0:
         return t0
 
-    labels = [classify_window(audio, float(st), FINE_WIN_SEC, classifier) for st in starts]
+    labels: List[str] = []
+    for st in starts:
+        labels.append(classify_window(audio, float(st), FINE_WIN_SEC, classifier))
+        if on_window_done is not None:
+            on_window_done()
 
     n = len(labels)
     left_match = np.array([1 if lb == left_label else 0 for lb in labels], dtype=np.int32)
@@ -284,7 +302,12 @@ def refine_boundary(
     return min(max(0.0, refined), total_dur)
 
 
-def refine_segments(audio: np.ndarray, segments: Sequence[Segment], classifier: YAMNetClassifier) -> List[Segment]:
+def refine_segments(
+    audio: np.ndarray,
+    segments: Sequence[Segment],
+    classifier: YAMNetClassifier,
+    on_boundary_done: Callable[[], None] | None = None,
+) -> List[Segment]:
     if len(segments) <= 1:
         return list(segments)
 
@@ -304,6 +327,8 @@ def refine_segments(audio: np.ndarray, segments: Sequence[Segment], classifier: 
 
         refined_boundaries.append(r)
         prev = r
+        if on_boundary_done is not None:
+            on_boundary_done()
 
     out: List[Segment] = []
     st = 0.0
@@ -343,8 +368,31 @@ def main() -> int:
     audio = load_audio_ffmpeg(args.audio, TARGET_SR)
     classifier = YAMNetClassifier()
 
-    coarse = build_coarse_segments(audio, classifier)
-    final_segments = refine_segments(audio, coarse, classifier)
+    total_dur = len(audio) / TARGET_SR
+    chunk_count = int(math.ceil(total_dur / CHUNK_SEC)) if total_dur > 0 else 0
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("{task.description}"),
+        BarColumn(),
+        TextColumn("{task.completed}/{task.total}"),
+        TimeElapsedColumn(),
+    ) as progress:
+        coarse_task = progress.add_task("ステップ1: 粗い区間分割", total=chunk_count)
+        coarse = build_coarse_segments(
+            audio,
+            classifier,
+            on_chunk_done=lambda: progress.advance(coarse_task),
+        )
+
+        boundary_count = max(0, len(coarse) - 1)
+        refine_task = progress.add_task("ステップ2: 境界の微調整", total=boundary_count)
+        final_segments = refine_segments(
+            audio,
+            coarse,
+            classifier,
+            on_boundary_done=lambda: progress.advance(refine_task),
+        )
 
     print(json.dumps(segments_to_dicts(final_segments), indent=args.indent, ensure_ascii=False))
     return 0
