@@ -1,271 +1,299 @@
-#!/usr/bin/env python3
-"""Segment audio into music, human_voice, and silence intervals using YAMNet + volume thresholds.
-
-Usage:
-    python yamnet_segmenter.py input.wav --output segments.json
-"""
-
-from __future__ import annotations
-
-import argparse
-import json
-import math
-import tempfile
-import urllib.request
-from dataclasses import dataclass
-from pathlib import Path
-from typing import Iterable, List, Sequence
-
-import librosa
 import numpy as np
+import librosa
 import tensorflow as tf
 import tensorflow_hub as hub
+from sys import argv
 
-YAMNET_HANDLE = "https://tfhub.dev/google/yamnet/1"
-YAMNET_CLASS_MAP_URL = (
-    "https://raw.githubusercontent.com/tensorflow/models/master/"
-    "research/audioset/yamnet/yamnet_class_map.csv"
-)
+# ----------------------------
+# Configuration
+# ----------------------------
+TARGET_SR = 16000
 
+# Coarse window
+CHUNK_SEC = 8.0
 
-@dataclass
-class Segment:
-    start: float
-    end: float
-    label: str
+# Fine boundary refinement
+FINE_SEARCH_RADIUS_SEC = 0.8
+FINE_WIN_SEC = 0.96
+FINE_HOP_SEC = 0.48
 
-    def to_dict(self) -> dict:
+# Volume thresholds
+SILENCE_DBFS = -55.0
+LOW_NOISE_DBFS = -45.0
+
+# Speech / Music thresholds
+SPEECH_TH = 0.20
+MUSIC_TH = 0.20
+
+# ----------------------------
+# Load YAMNet
+# ----------------------------
+yamnet = hub.load("https://tfhub.dev/google/yamnet/1")
+
+class_map_path = yamnet.class_map_path().numpy().decode("utf-8")
+class_names = []
+with open(class_map_path, "r", encoding="utf-8") as f:
+    next(f)
+    for line in f:
+        parts = line.strip().split(",")
+        class_names.append(parts[2])
+
+SPEECH_CLASSES = {
+    "Speech",
+    "Child speech, kid speaking",
+    "Conversation",
+    "Narration, monologue",
+    "Babbling",
+    "Speech synthesizer",
+    "Shout",
+    "Yell",
+    "Whispering",
+    "Singing",
+}
+
+MUSIC_CLASSES = {
+    "Music",
+    "Musical instrument",
+}
+
+name_to_idx = {n: i for i, n in enumerate(class_names)}
+speech_idxs = [name_to_idx[n] for n in SPEECH_CLASSES if n in name_to_idx]
+music_idxs = [name_to_idx[n] for n in MUSIC_CLASSES if n in name_to_idx]
+
+# ----------------------------
+# Volume utilities
+# ----------------------------
+def rms_dbfs(x):
+    rms = np.sqrt(np.mean(np.square(x)) + 1e-12)
+    return 20.0 * np.log10(rms + 1e-12)
+
+def peak_dbfs(x):
+    peak = np.max(np.abs(x)) + 1e-12
+    return 20.0 * np.log10(peak + 1e-12)
+
+def classify_volume_level(x):
+    r = rms_dbfs(x)
+    p = peak_dbfs(x)
+
+    if r < SILENCE_DBFS:
+        return "Silence", r, p
+    if r < LOW_NOISE_DBFS:
+        return "Silence2", r, p
+    return None, r, p
+
+# ----------------------------
+# YAMNet classification
+# ----------------------------
+def classify_chunk_with_yamnet(chunk_16k):
+    waveform = tf.convert_to_tensor(chunk_16k, dtype=tf.float32)
+    scores, embeddings, spectrogram = yamnet(waveform)
+    mean_scores = scores.numpy().mean(axis=0)
+
+    speech_score = float(mean_scores[speech_idxs].sum()) if speech_idxs else 0.0
+    music_score = float(mean_scores[music_idxs].sum()) if music_idxs else 0.0
+
+    return speech_score, music_score
+
+def decide_label(chunk_16k):
+    volume_label, r_db, p_db = classify_volume_level(chunk_16k)
+
+    if volume_label is not None:
         return {
-            "start": round(self.start, 3),
-            "end": round(self.end, 3),
-            "label": self.label,
+            "label": volume_label,
+            "rms_dbfs": r_db,
+            "peak_dbfs": p_db,
+            "speech_score": 0.0,
+            "music_score": 0.0,
         }
 
+    speech_score, music_score = classify_chunk_with_yamnet(chunk_16k)
 
-class YAMNetAudioSegmenter:
-    def __init__(
-        self,
-        very_low_db: float = -50.0,
-        low_db: float = -40.0,
-        coarse_step: float = 0.48,
-        refine_step: float = 0.02,
-        analysis_window: float = 0.96,
-    ) -> None:
-        self.very_low_db = very_low_db
-        self.low_db = low_db
-        self.coarse_step = coarse_step
-        self.refine_step = refine_step
-        self.analysis_window = analysis_window
+    label = "Speech" if speech_score >= music_score else "Music"
 
-        self.model = hub.load(YAMNET_HANDLE)
-        self.class_names = self._load_class_names()
-
-    def _load_class_names(self) -> List[str]:
-        cache_path = Path(tempfile.gettempdir()) / "yamnet_class_map.csv"
-        if not cache_path.exists():
-            urllib.request.urlretrieve(YAMNET_CLASS_MAP_URL, cache_path)
-
-        names: List[str] = []
-        with cache_path.open("r", encoding="utf-8") as f:
-            # first line is header
-            next(f)
-            for line in f:
-                fields = line.strip().split(",")
-                # CSV layout: index,mid,display_name
-                names.append(fields[2])
-        return names
-
-    def _rms_db(self, samples: np.ndarray) -> float:
-        if samples.size == 0:
-            return -120.0
-        rms = float(np.sqrt(np.mean(np.square(samples), dtype=np.float64)))
-        if rms <= 1e-10:
-            return -120.0
-        return 20.0 * math.log10(rms)
-
-    def _silence_label(self, db: float) -> str | None:
-        if db <= self.very_low_db:
-            return "silence_very_low"
-        if db <= self.low_db:
-            return "silence_low"
-        return None
-
-    def _bucket_yamnet_class(self, class_name: str) -> str:
-        c = class_name.lower()
-
-        voice_keywords = [
-            "speech",
-            "conversation",
-            "narration",
-            "whisper",
-            "chant",
-            "singing",
-            "vocal",
-            "choir",
-            "yell",
-            "shout",
-            "screaming",
-            "laugh",
-        ]
-        music_keywords = [
-            "music",
-            "musical",
-            "orchestra",
-            "instrument",
-            "drum",
-            "guitar",
-            "piano",
-            "violin",
-            "synthesizer",
-            "song",
-            "rapping",
-            "hip hop",
-        ]
-
-        if any(k in c for k in voice_keywords):
-            return "human_voice"
-        if any(k in c for k in music_keywords):
-            return "music"
-        return "other"
-
-    def _classify_non_silent_window(self, samples: np.ndarray) -> str:
-        if samples.size == 0:
-            return "other"
-
-        waveform = tf.convert_to_tensor(samples, dtype=tf.float32)
-        scores, _, _ = self.model(waveform)
-        mean_scores = tf.reduce_mean(scores, axis=0).numpy()
-        class_idx = int(np.argmax(mean_scores))
-        return self._bucket_yamnet_class(self.class_names[class_idx])
-
-    def label_window(self, samples: np.ndarray) -> str:
-        db = self._rms_db(samples)
-        silence = self._silence_label(db)
-        if silence is not None:
-            return silence
-        return self._classify_non_silent_window(samples)
-
-    def _window_at_time(self, audio: np.ndarray, sr: int, t: float) -> np.ndarray:
-        half = self.analysis_window / 2.0
-        start_t = max(0.0, t - half)
-        end_t = min(len(audio) / sr, t + half)
-        start_idx = int(start_t * sr)
-        end_idx = int(end_t * sr)
-        return audio[start_idx:end_idx]
-
-    def _label_at_time(self, audio: np.ndarray, sr: int, t: float) -> str:
-        return self.label_window(self._window_at_time(audio, sr, t))
-
-    def _merge_adjacent(self, segments: Sequence[Segment]) -> List[Segment]:
-        if not segments:
-            return []
-        merged: List[Segment] = [Segment(segments[0].start, segments[0].end, segments[0].label)]
-        for seg in segments[1:]:
-            prev = merged[-1]
-            if seg.label == prev.label and seg.start <= prev.end + 1e-6:
-                prev.end = max(prev.end, seg.end)
-            else:
-                merged.append(Segment(seg.start, seg.end, seg.label))
-        return merged
-
-    def _refine_boundary(
-        self,
-        audio: np.ndarray,
-        sr: int,
-        left_time: float,
-        right_time: float,
-        left_label: str,
-        right_label: str,
-    ) -> float:
-        if right_time <= left_time:
-            return left_time
-
-        t = left_time
-        last_left = left_time
-        while t <= right_time:
-            current = self._label_at_time(audio, sr, t)
-            if current == right_label:
-                return max(left_time, min(t, right_time))
-            if current == left_label:
-                last_left = t
-            t += self.refine_step
-
-        return (last_left + right_time) / 2.0
-
-    def segment(self, audio: np.ndarray, sr: int) -> List[Segment]:
-        duration = len(audio) / sr
-        if duration == 0:
-            return []
-
-        centers = list(np.arange(self.analysis_window / 2.0, duration, self.coarse_step))
-        if not centers:
-            centers = [duration / 2.0]
-
-        coarse_labels = [self._label_at_time(audio, sr, t) for t in centers]
-
-        boundaries = [0.0]
-        for i in range(len(centers) - 1):
-            t_left = centers[i]
-            t_right = centers[i + 1]
-            left_label = coarse_labels[i]
-            right_label = coarse_labels[i + 1]
-
-            if left_label == right_label:
-                continue
-            refined = self._refine_boundary(audio, sr, t_left, t_right, left_label, right_label)
-            boundaries.append(refined)
-
-        boundaries.append(duration)
-        boundaries = sorted(set(max(0.0, min(duration, b)) for b in boundaries))
-
-        segments: List[Segment] = []
-        for start, end in zip(boundaries[:-1], boundaries[1:]):
-            if end - start <= 1e-4:
-                continue
-            mid = (start + end) / 2.0
-            label = self._label_at_time(audio, sr, mid)
-            segments.append(Segment(start, end, label))
-
-        return self._merge_adjacent(segments)
-
-
-def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("input", type=Path, help="Input audio file path")
-    p.add_argument("--output", type=Path, default=Path("segments.json"), help="Output JSON path")
-    p.add_argument("--very-low-db", type=float, default=-50.0, help="Very low volume threshold in dBFS")
-    p.add_argument("--low-db", type=float, default=-40.0, help="Normal low volume threshold in dBFS")
-    p.add_argument("--coarse-step", type=float, default=0.48, help="Initial class-change scan interval in seconds")
-    p.add_argument("--refine-step", type=float, default=0.02, help="Boundary refinement scan interval in seconds")
-    p.add_argument("--analysis-window", type=float, default=0.96, help="Analysis window duration in seconds")
-    return p.parse_args()
-
-
-def main() -> None:
-    args = parse_args()
-
-    audio, sr = librosa.load(args.input.as_posix(), sr=16000, mono=True)
-
-    segmenter = YAMNetAudioSegmenter(
-        very_low_db=args.very_low_db,
-        low_db=args.low_db,
-        coarse_step=args.coarse_step,
-        refine_step=args.refine_step,
-        analysis_window=args.analysis_window,
-    )
-    segments = segmenter.segment(audio, sr)
-
-    payload = {
-        "input": args.input.as_posix(),
-        "sample_rate": sr,
-        "very_low_db": args.very_low_db,
-        "low_db": args.low_db,
-        "segments": [s.to_dict() for s in segments],
+    return {
+        "label": label,
+        "rms_dbfs": r_db,
+        "peak_dbfs": p_db,
+        "speech_score": speech_score,
+        "music_score": music_score,
     }
 
-    args.output.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    print(f"Wrote {len(segments)} segments to {args.output}")
+# ----------------------------
+# Window slicing
+# ----------------------------
+def slice_window(y, start_s, win_s):
+    start = int(round(start_s * TARGET_SR))
+    win = int(round(win_s * TARGET_SR))
 
+    if start < 0:
+        pad_left = -start
+        start = 0
+    else:
+        pad_left = 0
 
+    end = start + win
+    chunk = y[start:end]
+
+    if pad_left > 0:
+        chunk = np.pad(chunk, (pad_left, 0))
+    if len(chunk) < win:
+        chunk = np.pad(chunk, (0, win - len(chunk)))
+
+    return chunk
+
+# ----------------------------
+# Coarse pass
+# ----------------------------
+def coarse_pass(y):
+    chunk_len = int(CHUNK_SEC * TARGET_SR)
+    n_chunks = int(np.ceil(len(y) / chunk_len))
+    out = []
+
+    for i in range(n_chunks):
+        start = i * chunk_len
+        end = min((i + 1) * chunk_len, len(y))
+        chunk = y[start:end]
+
+        if len(chunk) < chunk_len:
+            chunk = np.pad(chunk, (0, chunk_len - len(chunk)))
+
+        result = decide_label(chunk)
+
+        out.append({
+            "chunk_index": i,
+            "start_sec": i * CHUNK_SEC,
+            "end_sec": (i + 1) * CHUNK_SEC,
+            **result,
+        })
+
+    return out
+
+# ----------------------------
+# Build segments
+# ----------------------------
+def build_segments(coarse):
+    if not coarse:
+        return []
+
+    segs = [{
+        "label": coarse[0]["label"],
+        "start": coarse[0]["start_sec"],
+        "end": coarse[0]["end_sec"]
+    }]
+
+    for r in coarse[1:]:
+        if r["label"] == segs[-1]["label"]:
+            segs[-1]["end"] = r["end_sec"]
+        else:
+            segs.append({
+                "label": r["label"],
+                "start": r["start_sec"],
+                "end": r["end_sec"]
+            })
+
+    return segs
+
+# ----------------------------
+# Fine boundary refinement
+# ----------------------------
+def refine_single_boundary(y, t0, left_label, right_label):
+    R = FINE_SEARCH_RADIUS_SEC
+    win = FINE_WIN_SEC
+    hop = FINE_HOP_SEC
+
+    start_min = t0 - R
+    start_max = t0 + R - win
+    if start_max < start_min:
+        return t0
+
+    starts = []
+    labels = []
+
+    s = start_min
+    while s <= start_max + 1e-9:
+        chunk = slice_window(y, s, win)
+        r = decide_label(chunk)
+        starts.append(s)
+        labels.append(r["label"])
+        s += hop
+
+    if len(labels) < 2:
+        return t0
+
+    best_k = None
+    best_score = -1
+
+    left_prefix = [0] * (len(labels) + 1)
+    for i, lab in enumerate(labels):
+        left_prefix[i + 1] = left_prefix[i] + (1 if lab == left_label else 0)
+
+    right_suffix = [0] * (len(labels) + 1)
+    for i in range(len(labels) - 1, -1, -1):
+        right_suffix[i] = right_suffix[i + 1] + (1 if labels[i] == right_label else 0)
+
+    for k in range(len(labels) - 1):
+        score = left_prefix[k + 1] + right_suffix[k + 1]
+        if score > best_score:
+            best_score = score
+            best_k = k
+
+    if best_k is None:
+        return t0
+
+    return starts[best_k] + win
+
+def refine_segments_with_finepass(y, segments):
+    if len(segments) < 2:
+        return segments
+
+    refined = [dict(segments[0])]
+
+    for i in range(1, len(segments)):
+        prev_seg = refined[-1]
+        cur_seg = dict(segments[i])
+
+        t0 = prev_seg["end"]
+        refined_t = refine_single_boundary(
+            y, t0,
+            prev_seg["label"],
+            cur_seg["label"]
+        )
+
+        refined_t = max(prev_seg["start"], min(refined_t, cur_seg["end"]))
+
+        prev_seg["end"] = refined_t
+        cur_seg["start"] = refined_t
+
+        refined.append(cur_seg)
+
+    return refined
+
+# ----------------------------
+# Time formatting
+# ----------------------------
+def sec_to_hms(sec):
+    total = int(round(sec))
+    h = total // 3600
+    m = (total % 3600) // 60
+    s = total % 60
+    return f"{h:02d}:{m:02d}:{s:02d}"
+
+# ----------------------------
+# Main
+# ----------------------------
 if __name__ == "__main__":
-    main()
+    audio_path = argv[1]
+
+    y, sr = librosa.load(audio_path, sr=TARGET_SR, mono=True)
+
+    coarse = coarse_pass(y)
+    segments = build_segments(coarse)
+    refined_segments = refine_segments_with_finepass(y, segments)
+
+    print("=== Segments (Coarse) ===")
+    for s in segments:
+        print(f"{sec_to_hms(s['start'])} - {sec_to_hms(s['end'])}  {s['label']}")
+
+    print("\n=== Segments (Refined) ===")
+    for s in refined_segments:
+        print(f"{sec_to_hms(s['start'])} - {sec_to_hms(s['end'])}  {s['label']}")
