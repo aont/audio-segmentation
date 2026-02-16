@@ -21,8 +21,6 @@ from pathlib import Path
 from typing import Dict, List, Sequence, Tuple
 
 import numpy as np
-import tensorflow as tf
-import tensorflow_hub as hub
 from rich.progress import track
 
 
@@ -61,6 +59,8 @@ class YAMNetSegmenter:
         self.silent2_db = silent2_db
         self.tyam = tyam
         self.tfine = tfine
+
+        import tensorflow_hub as hub
 
         logging.info("Loading YAMNet model from TF-Hub...")
         self.model = hub.load("https://tfhub.dev/google/yamnet/1")
@@ -289,6 +289,8 @@ class YAMNetSegmenter:
 
 
 def load_audio_mono16k(audio_path: Path) -> Tuple[np.ndarray, float]:
+    import tensorflow as tf
+
     try:
         binary = tf.io.read_file(str(audio_path))
         wav, sample_rate = tf.audio.decode_wav(binary, desired_channels=1)
