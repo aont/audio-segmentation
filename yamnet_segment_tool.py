@@ -282,8 +282,8 @@ class YAMNetSegmenter:
             l1_before = intervals[idx].label
             l1_after = intervals[idx + 1].label
 
-            cmin = max(t1 - self.tyam / 2.0, self.tyam)
-            cmax = min(t1 + self.tyam / 2.0, duration_s - self.tyam)
+            cmin = max(t1 - STEP1_LABEL_HOLD_FRAMES * self.tyam / 2.0, self.tyam)
+            cmax = min(t1 + STEP1_LABEL_HOLD_FRAMES * self.tyam / 2.0, duration_s - self.tyam)
             if cmin > cmax:
                 logging.debug(
                     "[STEP2] boundary=%d t1=%.2f skipped (candidate range empty: %.2f..%.2f)",
