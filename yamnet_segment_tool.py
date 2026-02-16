@@ -235,6 +235,7 @@ class YAMNetSegmenter:
         """Apply post rules for silence bridges in step 1 output.
 
         Rules:
+        0) Adjacent Speech1/Speech2 blocks are merged and normalized to Speech2.
         1) Speech - Silent(1/2)+ - Music (and inverse) => direct boundary at silence midpoint.
         2) Speech - Silent2+ - Speech (and Music - Silent2+ - Music) => merge into one interval.
         """
@@ -285,7 +286,17 @@ class YAMNetSegmenter:
                 merged.append(seg)
             else:
                 merged[-1].end = seg.end
-        return merged
+
+        # Normalize legacy speech tiers: contiguous Speech1/Speech2 should be treated as Speech2.
+        normalized: List[Interval] = []
+        speech_tier_labels = {"Speech1", "Speech2"}
+        for seg in merged:
+            normalized_label = "Speech2" if seg.label in speech_tier_labels else seg.label
+            if not normalized or normalized[-1].label != normalized_label:
+                normalized.append(Interval(start=seg.start, end=seg.end, label=normalized_label))
+            else:
+                normalized[-1].end = seg.end
+        return normalized
 
     @staticmethod
     def _distance(expected_label: str, observed: ClassificationResult) -> float:
