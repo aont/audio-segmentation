@@ -172,3 +172,21 @@ Key constants in `segment_audio.py`:
 - `FINE_HOP_SEC = 0.2`
 
 Adjusting these changes sensitivity, smoothness, and speed.
+
+
+---
+
+## 9) Post-processing rules (silence cleanup)
+
+After Step 2 boundary refinement, `postprocess_step2_segments` applies deterministic cleanup:
+
+1. **Normalize silent variants**
+   - Merge adjacent `Silence`/`Silence2`/legacy silent labels and normalize to `Silence`.
+2. **Rule 2 (iterative)**
+   - `Speech - Silence - Speech` becomes a single `Speech` segment.
+   - Applied repeatedly until no further changes are possible.
+3. **Rule 3 (iterative)**
+   - `(Music|Speech) - Silence - (Music|Speech)` removes the center `Silence` by splitting at the silence midpoint.
+   - Applied repeatedly until no such pattern remains.
+
+The iterative fixed-point behavior for Rule 2 and Rule 3 prevents residual silence islands that can appear when one rewrite exposes another candidate pattern later in the same timeline.
