@@ -47,26 +47,6 @@ class Interval:
 
 
 class YAMNetSegmenter:
-    @staticmethod
-    def _resolve_step1_label(left_label: str, right_label: str) -> str:
-        """Resolve Step 1 merge label for adjacent segments.
-
-        For subtype pairs that should be treated as one region in Step 1,
-        keep only one merged interval.
-        """
-        speech_pair = {left_label, right_label}
-        if speech_pair <= {"Speech1", "Speech2"}:
-            return "Speech2"
-        return right_label
-
-    @staticmethod
-    def _is_step1_merge_pair(left_label: str, right_label: str) -> bool:
-        if left_label == right_label:
-            return True
-        silence_pair = {left_label, right_label} <= {"Silent1", "Silent2"}
-        speech_pair = {left_label, right_label} <= {"Speech1", "Speech2"}
-        return silence_pair or speech_pair
-
     def __init__(
         self,
         silent1_db: float,
@@ -239,17 +219,10 @@ class YAMNetSegmenter:
 
         merged: List[Interval] = []
         for seg in coarse:
-            if not merged:
+            if not merged or merged[-1].label != seg.label:
                 merged.append(Interval(start=seg.start, end=seg.end, label=seg.label))
-                continue
-
-            previous_label = merged[-1].label
-            resolved_label = self._resolve_step1_label(previous_label, seg.label)
-            if self._is_step1_merge_pair(previous_label, seg.label):
-                merged[-1].label = resolved_label
-                merged[-1].end = seg.end
             else:
-                merged.append(Interval(start=seg.start, end=seg.end, label=seg.label))
+                merged[-1].end = seg.end
 
         t1_list = [interval.end for interval in merged[:-1]]
         logging.info("Step 1 complete. segments=%d merged_intervals=%d boundaries=%d", n_segments, len(merged), len(t1_list))
