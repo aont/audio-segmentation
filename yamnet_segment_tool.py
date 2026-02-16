@@ -48,24 +48,77 @@ class Interval:
 
 class YAMNetSegmenter:
     @staticmethod
-    def _resolve_step1_label(left_label: str, right_label: str) -> str:
-        """Resolve Step 1 merge label for adjacent segments.
+    def _merge_adjacent_same_label(intervals: Sequence[Interval]) -> List[Interval]:
+        merged: List[Interval] = []
+        for seg in intervals:
+            if not merged:
+                merged.append(Interval(start=seg.start, end=seg.end, label=seg.label))
+                continue
 
-        For subtype pairs that should be treated as one region in Step 1,
-        keep only one merged interval.
-        """
-        speech_pair = {left_label, right_label}
-        if speech_pair <= {"Speech1", "Speech2"}:
-            return "Speech2"
-        return right_label
+            if merged[-1].label == seg.label:
+                merged[-1].end = seg.end
+            else:
+                merged.append(Interval(start=seg.start, end=seg.end, label=seg.label))
+        return merged
 
     @staticmethod
-    def _is_step1_merge_pair(left_label: str, right_label: str) -> bool:
-        if left_label == right_label:
-            return True
-        silence_pair = {left_label, right_label} <= {"Silent1", "Silent2"}
-        speech_pair = {left_label, right_label} <= {"Speech1", "Speech2"}
-        return silence_pair or speech_pair
+    def _apply_step1_transition_rules(intervals: Sequence[Interval]) -> List[Interval]:
+        """Apply Step 1 transition rules on coarse intervals.
+
+        Rules:
+        - Speech/Music - Silent(1 or 2)+ - opposite label
+          => remove silence and set boundary at silence midpoint.
+        - Speech/Music - Silent2+ - same label
+          => merge to a single Speech/Music interval.
+        """
+
+        voice_labels = {"Speech", "Music"}
+        silence_labels = {"Silent1", "Silent2"}
+
+        working = [Interval(start=s.start, end=s.end, label=s.label) for s in intervals]
+        transformed: List[Interval] = []
+
+        i = 0
+        while i < len(working):
+            current = working[i]
+            if current.label not in voice_labels:
+                transformed.append(current)
+                i += 1
+                continue
+
+            j = i + 1
+            while j < len(working) and working[j].label in silence_labels:
+                j += 1
+
+            has_silence_run = j > i + 1
+            has_right_voice = j < len(working) and working[j].label in voice_labels
+            if not has_silence_run or not has_right_voice:
+                transformed.append(current)
+                i += 1
+                continue
+
+            right = working[j]
+            silence_run = working[i + 1 : j]
+
+            if current.label != right.label:
+                silent_start = silence_run[0].start
+                silent_end = silence_run[-1].end
+                mid = (silent_start + silent_end) / 2.0
+
+                transformed.append(Interval(start=current.start, end=mid, label=current.label))
+                working[j] = Interval(start=mid, end=right.end, label=right.label)
+                i = j
+                continue
+
+            if all(seg.label == "Silent2" for seg in silence_run):
+                transformed.append(Interval(start=current.start, end=right.end, label=current.label))
+                i = j + 1
+                continue
+
+            transformed.append(current)
+            i += 1
+
+        return YAMNetSegmenter._merge_adjacent_same_label(transformed)
 
     def __init__(
         self,
@@ -237,19 +290,8 @@ class YAMNetSegmenter:
                 for skip_idx in range(i + 1, min(i + 1 + STEP1_LABEL_HOLD_FRAMES, n_segments)):
                     forced_labels[skip_idx] = result.label
 
-        merged: List[Interval] = []
-        for seg in coarse:
-            if not merged:
-                merged.append(Interval(start=seg.start, end=seg.end, label=seg.label))
-                continue
-
-            previous_label = merged[-1].label
-            resolved_label = self._resolve_step1_label(previous_label, seg.label)
-            if self._is_step1_merge_pair(previous_label, seg.label):
-                merged[-1].label = resolved_label
-                merged[-1].end = seg.end
-            else:
-                merged.append(Interval(start=seg.start, end=seg.end, label=seg.label))
+        merged = self._merge_adjacent_same_label(coarse)
+        merged = self._apply_step1_transition_rules(merged)
 
         t1_list = [interval.end for interval in merged[:-1]]
         logging.info("Step 1 complete. segments=%d merged_intervals=%d boundaries=%d", n_segments, len(merged), len(t1_list))
